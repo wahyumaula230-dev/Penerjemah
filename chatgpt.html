@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Hand Gesture PRO</title>
+
+<style>
+*{box-sizing:border-box}
+body{
+ margin:0;background:#07111f;color:#fff;
+ font-family:Arial,sans-serif;padding:14px
+}
+.app{max-width:900px;margin:auto}
+h1{text-align:center;margin:8px 0}
+.sub{text-align:center;color:#9eb5ca;margin-bottom:15px}
+.camera{
+ position:relative;background:#000;border-radius:20px;
+ overflow:hidden;border:2px solid #2196f3
+}
+video{width:100%;display:block;transform:scaleX(-1)}
+canvas{
+ position:absolute;inset:0;width:100%;height:100%;
+ transform:scaleX(-1);pointer-events:none
+}
+.badge{
+ position:absolute;top:12px;left:12px;
+ background:#000b;padding:9px 12px;border-radius:12px
+}
+.dot{
+ display:inline-block;width:10px;height:10px;
+ border-radius:50%;background:#f33;margin-right:7px
+}
+.panel{
+ margin-top:14px;padding:16px;border-radius:16px;
+ background:#101e2e;border:1px solid #20384f
+}
+.result{text-align:center;font-size:28px;font-weight:bold;color:#55c8ff}
+.motion{text-align:center;margin-top:7px;color:#b9d0e2}
+.grid{
+ display:grid;grid-template-columns:repeat(2,1fr);
+ gap:10px;margin-top:14px
+}
+button,select{
+ width:100%;padding:13px;border:0;border-radius:11px;
+ font-size:15px
+}
+button{background:#168cff;color:#fff;font-weight:bold}
+.stop{background:#d93636}
+select{background:#172a3e;color:#fff}
+.stats{
+ display:grid;grid-template-columns:repeat(3,1fr);
+ gap:8px;margin-top:12px
+}
+.stat{
+ background:#07111f;padding:12px;text-align:center;
+ border-radius:10px
+}
+.stat b{display:block;font-size:20px;color:#55c8ff}
+@media(max-width:500px){
+ .result{font-size:22px}
+}
+</style>
+</head>
+
+<body>
+<div class="app">
+
+<h1>🤖 AI HAND GESTURE PRO</h1>
+<div class="sub">Realtime • 2 Tangan • Deteksi Gerakan • Voice Indonesia</div>
+
+<div class="camera">
+ <video id="video" autoplay playsinline muted></video>
+ <canvas id="canvas"></canvas>
+
+ <div class="badge">
+  <span class="dot" id="dot"></span>
+  <span id="camStatus">Kamera mati</span>
+ </div>
+</div>
+
+<div class="panel">
+ <div class="result" id="result">Belum ada gesture</div>
+ <div class="motion" id="motion">
+  Tekan Mulai Kamera
+ </div>
+
+ <div class="grid">
+  <button id="start">📷 Mulai Kamera</button>
+  <button id="stop" class="stop">⛔ Berhenti</button>
+
+  <select id="lang">
+   <option value="id-ID">🇮🇩 Bahasa Indonesia</option>
+   <option value="en-US">🇺🇸 English</option>
+  </select>
+
+  <button id="test">🔊 Tes Suara</button>
+ </div>
+
+ <div class="stats">
+  <div class="stat">
+   <b id="hands">0</b>Tangan
+  </div>
+  <div class="stat">
+   <b id="fps">0</b>FPS
+  </div>
+  <div class="stat">
+   <b id="confidence">0%</b>Confidence
+  </div>
+ </div>
+</div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+<script>
+const video=document.getElementById("video");
+const canvas=document.getElementById("canvas");
+const ctx=canvas.getContext("2d");
+
+const result=document.getElementById("result");
+const motion=document.getElementById("motion");
+const camStatus=document.getElementById("camStatus");
+const dot=document.getElementById("dot");
+
+const handsEl=document.getElementById("hands");
+const fpsEl=document.getElementById("fps");
+const confidenceEl=document.getElementById("confidence");
+
+let stream=null;
+let active=false;
+let lastSpeech="";
+let lastSpeechTime=0;
+
+let previousCenter=null;
+let movement="";
+let frameCount=0;
+let fpsStart=performance.now();
+
+
+// =========================
+// VOICE
+// =========================
+
+function speak(text){
+
+ if(!("speechSynthesis" in window))return;
+
+ const now=Date.now();
+
+ if(text===lastSpeech && now-lastSpeechTime<1800)return;
+
+ lastSpeech=text;
+ lastSpeechTime=now;
+
+ speechSynthesis.cancel();
+
+ const u=new SpeechSynthesisUtterance(text);
+ u.lang=document.getElementById("lang").value;
+ u.rate=.9;
+ u.pitch=1;
+
+ speechSynthesis.speak(u);
+}
+
+document.getElementById("test").onclick=()=>{
+ speak("Sistem deteksi gesture tangan aktif");
+};
+
+
+// =========================
+// MEDIAPIPE
+// =========================
+
+const hands=new Hands({
+ locateFile:file=>
+ `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+});
+
+hands.setOptions({
+ maxNumHands:2,
+ modelComplexity:1,
+ minDetectionConfidence:.55,
+ minTrackingConfidence:.55
+});
+
+hands.onResults(processResults);
+
+
+// =========================
+// START CAMERA
+// =========================
+
+document.getElementById("start").onclick=async()=>{
+
+ if(active)return;
+
+ try{
+
+  stream=await navigator.mediaDevices.getUserMedia({
+   video:{
+    facingMode:"user",
+    width:{ideal:1280},
+    height:{ideal:720}
+   },
+   audio:false
+  });
+
+  video.srcObject=stream;
+  active=true;
+
+  camStatus.textContent="Kamera aktif";
+  dot.style.background="#00e676";
+
+  cameraLoop();
+
+ }catch(e){
+
+  camStatus.textContent="Gagal membuka kamera";
+
+  alert(
+   "Kamera tidak dapat dibuka.\n\n"+
+   "Pastikan izin kamera diberikan dan HTML dijalankan melalui HTTPS atau localhost."
+  );
+ }
+};
+
+
+// =========================
+// STOP
+// =========================
+
+document.getElementById("stop").onclick=()=>{
+
+ active=false;
+
+ if(stream){
+  stream.getTracks().forEach(t=>t.stop());
+ }
+
+ stream=null;
+ video.srcObject=null;
+
+ ctx.clearRect(0,0,canvas.width,canvas.height);
+
+ camStatus.textContent="Kamera mati";
+ dot.style.background="#f33";
+
+ result.textContent="Belum ada gesture";
+ motion.textContent="Tekan Mulai Kamera";
+ handsEl.textContent="0";
+ confidenceEl.textContent="0%";
+};
+
+
+// =========================
+// CAMERA LOOP
+// =========================
+
+async function cameraLoop(){
+
+ if(!active)return;
+
+ if(video.readyState>=2){
+  await hands.send({image:video});
+ }
+
+ requestAnimationFrame(cameraLoop);
+}
+
+
+// =========================
+// GEOMETRY
+// =========================
+
+function dist(a,b){
+
+ return Math.hypot(
+  a.x-b.x,
+  a.y-b.y
+ );
+}
+
+
+function fingerUp(l,tip,pip){
+ return l[tip].y<l[pip].y;
+}
+
+
+function fingers(l){
+
+ return {
+  index:fingerUp(l,8,6),
+  middle:fingerUp(l,12,10),
+  ring:fingerUp(l,16,14),
+  pinky:fingerUp(l,20,18)
+ };
+}
+
+
+// =========================
+// GESTURE ENGINE
+// =========================
+
+function recognize(l){
+
+ const f=fingers(l);
+
+ const count=[
+  f.index,
+  f.middle,
+  f.ring,
+  f.pinky
+ ].filter(Boolean).length;
+
+ // Telapak
+ if(count===4)
+  return ["✋ TELAPAK TERBUKA","Halo",96];
+
+ // Kepalan
+ if(count===0)
+  return ["✊ KEPALAN","Stop",95];
+
+ // Peace
+ if(f.index&&f.middle&&!f.ring&&!f.pinky)
+  return ["✌️ DUA JARI","Dua",94];
+
+ // Three
+ if(f.index&&f.middle&&f.ring&&!f.pinky)
+  return ["🤟 TIGA JARI","Tiga",92];
+
+ // Four
+ if(f.index&&f.middle&&f.ring&&f.pinky)
+  return ["🖐️ EMPAT JARI","Empat",90];
+
+ // One
+ if(f.index&&!f.middle&&!f.ring&&!f.pinky)
+  return ["☝️ TELUNJUK","Satu",91];
+
+ // Thumb
+ const thumbUp=l[4].y<l[3].y;
+
+ if(thumbUp&&!f.index&&!f.middle&&!f.ring&&!f.pinky)
+  return ["👍 JEMPOL ATAS","Bagus",93];
+
+ // OK
+ if(
+  dist(l[4],l[8])<.07 &&
+  f.middle&&f.ring&&f.pinky
+ )
+  return ["👌 OK","Oke",89];
+
+ // Rock
+ if(f.index&&!f.middle&&!f.ring&&f.pinky)
+  return ["🤘 ROCK","Rock",88];
+
+ // Call
+ if(!f.index&&!f.middle&&!f.ring&&f.pinky)
+  return ["🤙 CALL ME","Telepon",87];
+
+ return ["🖐️ GESTURE CUSTOM","Gesture terdeteksi",70];
+}
+
+
+// =========================
+// CENTER HAND
+// =========================
+
+function getCenter(l){
+
+ let x=0,y=0;
+
+ for(const p of l){
+  x+=p.x;
+  y+=p.y;
+ }
+
+ return {
+  x:x/l.length,
+  y:y/l.length
+ };
+}
+
+
+// =========================
+// MOVEMENT
+// =========================
+
+function detectMovement(center){
+
+ if(!previousCenter){
+
+  previousCenter=center;
+  return "Diam";
+
+ }
+
+ const dx=center.x-previousCenter.x;
+ const dy=center.y-previousCenter.y;
+
+ previousCenter=center;
+
+ const threshold=.018;
+
+ if(Math.abs(dx)<threshold &&
+    Math.abs(dy)<threshold){
+
+  return "Diam";
+ }
+
+ if(Math.abs(dx)>Math.abs(dy)){
+
+  return dx>0 ?
+   "Gerak ke kanan" :
+   "Gerak ke kiri";
+
+ }else{
+
+  return dy>0 ?
+   "Gerak ke bawah" :
+   "Gerak ke atas";
+ }
+}
+
+
+// =========================
+// RESULTS
+// =========================
+
+function processResults(res){
+
+ canvas.width=video.videoWidth;
+ canvas.height=video.videoHeight;
+
+ ctx.clearRect(
+  0,0,canvas.width,canvas.height
+ );
+
+ const list=res.multiHandLandmarks||[];
+
+ handsEl.textContent=list.length;
+
+ if(!list.length){
+
+  result.textContent="Tidak ada tangan";
+  motion.textContent="Arahkan tangan ke kamera";
+  confidenceEl.textContent="0%";
+
+  previousCenter=null;
+
+  return;
+ }
+
+
+ let highest=null;
+ let allCenters=[];
+
+
+ list.forEach((landmarks,i)=>{
+
+  drawConnectors(
+   ctx,
+   landmarks,
+   HAND_CONNECTIONS,
+   {color:"#00e5ff",lineWidth:4}
+  );
+
+  drawLandmarks(
+   ctx,
+   landmarks,
+   {color:"#ffffff",lineWidth:1,radius:5}
+  );
+
+  const g=recognize(landmarks);
+
+  if(!highest || g[2]>highest[2]){
+   highest=g;
+  }
+
+  allCenters.push(getCenter(landmarks));
+ });
+
+
+ if(highest){
+
+  result.textContent=highest[0];
+  confidenceEl.textContent=highest[2]+"%";
+
+  if(allCenters.length===1){
+
+   movement=detectMovement(allCenters[0]);
+
+  }else{
+
+   const avg={
+    x:allCenters.reduce((a,b)=>a+b.x,0)/allCenters.length,
+    y:allCenters.reduce((a,b)=>a+b.y,0)/allCenters.length
+   };
+
+   movement=detectMovement(avg);
+  }
+
+  motion.textContent="Gerakan: "+movement;
+
+  // Suara gesture
+  if(highest[0]!=="🖐️ GESTURE CUSTOM"){
+   speak(highest[1]);
+  }
+
+  // Suara gerakan
+  if(
+   movement!=="Diam" &&
+   Math.random()<.08
+  ){
+   speak(movement);
+  }
+ }
+
+
+ // FPS
+ frameCount++;
+
+ const now=performance.now();
+
+ if(now-fpsStart>=1000){
+
+  fpsEl.textContent=frameCount;
+
+  frameCount=0;
+  fpsStart=now;
+ }
+}
+</script>
+
+</body>
+</html>
